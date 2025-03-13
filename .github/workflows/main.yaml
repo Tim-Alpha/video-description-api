@@ -1,0 +1,28 @@
+name: Video-api-workflow
+
+on:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  CI-CD: 
+    runs-on: ['video-desc']
+    steps:
+      - name: update system
+        run: sudo apt update
+      
+      - name: Code-Checkout
+        uses: actions/checkout@v3
+
+      - name: Build Docker
+        run: docker build -t video-api-img:latest .
+
+      - name: Remove Docker Container -
+        run: docker rm -f video-api || true
+
+      - name: Docker Run
+        run: docker run --restart=always -p 8000:8000 -d --name=video-api video-api-img:latest
+
+      - name: Docker Clean
+        run: docker system prune -f

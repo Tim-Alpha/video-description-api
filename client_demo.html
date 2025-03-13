@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Analysis Demo</title>
+</head>
+<body>
+    <h1>Video Analysis Demo</h1>
+    <input type="file" id="videoFile" accept="video/*">
+    <button onclick="uploadVideo()">Analyze Video</button>
+    <div id="status"></div>
+    <pre id="result"></pre>
+
+    <script>
+        function uploadVideo() {
+            const fileInput = document.getElementById('videoFile');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('Please select a video file');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('video', file);
+
+            fetch('/api/v1/analyze_video', {
+                method: 'POST',
+                body: formData
+            }).then(response => response.json())
+              .then(data => {
+                  console.log(data);
+                  connectToEventStream();
+              });
+        }
+
+        function connectToEventStream() {
+            const eventSource = new EventSource('/events');
+            
+            eventSource.onmessage = function(event) {
+                console.log(event.data);
+            };
+
+            eventSource.addEventListener('status', function(event) {
+                document.getElementById('status').innerText = event.data;
+            });
+
+            eventSource.addEventListener('data', function(event) {
+                const result = document.getElementById('result');
+                result.innerText += event.data + '\n\n';
+            });
+
+            eventSource.addEventListener('error', function(event) {
+                console.error('Error:', event.data);
+                eventSource.close();
+            });
+        }
+    </script>
+</body>
+</html>

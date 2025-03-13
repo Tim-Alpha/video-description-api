@@ -1,0 +1,13 @@
+__pycache__
+pytest_cache
+venv
+video_analysis_output
+demo.mp4
+demo1.mp4
+demo2.mp4
+demo3.mp4
+demo4.mp4
+Final1.mp4
+mock_video.mp4
+script.py
+docs/data_record.json
