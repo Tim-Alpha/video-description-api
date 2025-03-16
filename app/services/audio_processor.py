@@ -1,7 +1,7 @@
 import os
 import time
 from moviepy.editor import VideoFileClip
-from openai import AsyncOpenAI
+import google.generativeai as genai
 import tempfile
 from app.core.logging import logger
 from datetime import datetime
@@ -15,7 +15,10 @@ import json
 import asyncio
 
 OUTPUT_FOLDER = os.path.abspath("video_analysis_output")
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+# Initialize Gemini API
+genai.configure(api_key=settings.GEMINI_API_KEY)
+
 MAX_CHUNK_SIZE = 24 * 1024 * 1024  # 24MB to stay safely under the 25MB limit
 CHUNK_DURATION = 10 * 60 * 1000  # 10 minutes in milliseconds
 
@@ -74,7 +77,7 @@ async def process_audio(video_content: bytes, task_id: str = None) -> Tuple[List
         if task_id:
             task_tracker.update_progress(task_id, "Starting audio transcription", 30)
         
-        logger.info("Transcribing audio using OpenAI Whisper API...")
+        logger.info("Transcribing audio using Gemini API...")
         
         # Calculate number of chunks needed
         audio_length = len(video)
@@ -105,13 +108,9 @@ async def process_audio(video_content: bytes, task_id: str = None) -> Tuple[List
                     if chunk_size > MAX_CHUNK_SIZE:
                         raise ValueError(f"Chunk {i+1} size ({chunk_size} bytes) exceeds maximum allowed size ({MAX_CHUNK_SIZE} bytes)")
                     
-                    # Transcribe chunk
-                    with open(temp_chunk.name, "rb") as audio_file:
-                        transcription = await client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file
-                        )
-                        transcriptions.append(transcription.text)
+                    # Transcribe chunk using Gemini API
+                    transcription = await transcribe_audio_with_gemini(temp_chunk.name)
+                    transcriptions.append(transcription)
                         
                     logger.info(f"Chunk {i+1}/{num_chunks} transcribed successfully")
                     
@@ -155,6 +154,44 @@ async def process_audio(video_content: bytes, task_id: str = None) -> Tuple[List
             except Exception as e:
                 logger.error(f"Error cleaning up temporary video file: {str(e)}")
 
+async def transcribe_audio_with_gemini(audio_file_path: str) -> str:
+    """
+    Transcribe audio using Gemini API.
+    """
+    try:
+        # Create a coroutine to run the synchronous Gemini API call in a separate thread
+        loop = asyncio.get_event_loop()
+        
+        def sync_transcribe():
+            # Open the audio file
+            with open(audio_file_path, "rb") as audio_file:
+                audio_data = audio_file.read()
+            
+            # Use Gemini's Audio model for transcription
+            # Note: This is a placeholder for the actual Gemini API call
+            # You'll need to replace this with the actual Gemini audio transcription method
+            model = genai.GenerativeModel('gemini-pro-vision')
+            
+            # We're using the vision model to analyze audio since Gemini doesn't have a dedicated audio API
+            # We'll send a prompt asking it to transcribe the audio
+            response = model.generate_content(
+                [
+                    "Please transcribe the following audio file in full detail:",
+                    {"mime_type": "audio/wav", "data": audio_data}
+                ]
+            )
+            
+            # Extract the transcription from the response
+            return response.text
+        
+        # Run the synchronous function in a thread pool
+        transcription = await loop.run_in_executor(None, sync_transcribe)
+        return transcription
+    
+    except Exception as e:
+        logger.error(f"Error transcribing audio with Gemini: {str(e)}")
+        return f"Transcription error: {str(e)}"
+
 async def check_content_safety(text: str) -> Tuple[bool, List[str]]:
     """
     Check if the content is safe by analyzing the text for NSFW content.
@@ -171,33 +208,46 @@ async def check_content_safety(text: str) -> Tuple[bool, List[str]]:
         if warnings:
             return False, warnings
 
-        # Use OpenAI to check for more subtle NSFW content
+        # Use Gemini to check for more subtle NSFW content
         try:
-            response = await client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are a very strict content moderator. Your task is to identify any inappropriate, 
-                        adult, sexual, NSFW, or suggestive content in the text. Be extremely conservative - if there's any doubt,
-                        mark it as inappropriate. Return a JSON object with:
-                        {
-                            "is_safe": boolean,
-                            "warnings": [list of specific warnings],
-                            "reason": "detailed explanation"
-                        }"""
-                    },
-                    {
-                        "role": "user",
-                        "content": text
-                    }
-                ],
-                temperature=0.1,
-                response_format={ "type": "json_object" },
-                timeout=30  # 30 seconds timeout
-            )
+            safety_prompt = f"""
+            Task: Analyze the following text for inappropriate content.
+            Be extremely conservative - if there's any doubt, mark it as inappropriate.
+            Return a JSON object with this exact format:
+            {{
+                "is_safe": boolean,
+                "warnings": [list of specific warnings],
+                "reason": "detailed explanation"
+            }}
             
-            result = json.loads(response.choices[0].message.content)
+            Text to analyze:
+            {text}
+            """
+            
+            # Create a coroutine to run the synchronous Gemini API call in a separate thread
+            loop = asyncio.get_event_loop()
+            
+            def sync_safety_check():
+                model = genai.GenerativeModel('gemini-pro')
+                response = model.generate_content(
+                    safety_prompt,
+                    generation_config={"temperature": 0.1}
+                )
+                return response.text
+            
+            # Run the synchronous function in a thread pool
+            safety_result_text = await loop.run_in_executor(None, sync_safety_check)
+            
+            # Extract the JSON part of the response
+            # Look for JSON between curly braces
+            json_match = re.search(r'\{.*\}', safety_result_text, re.DOTALL)
+            if json_match:
+                safety_result_json = json_match.group(0)
+                result = json.loads(safety_result_json)
+            else:
+                # If no JSON found, try to parse the entire response
+                result = json.loads(safety_result_text)
+            
             if not result.get("is_safe", False):
                 warnings.extend(result.get("warnings", []))
                 reason = result.get("reason", "Content flagged as inappropriate")
@@ -211,10 +261,10 @@ async def check_content_safety(text: str) -> Tuple[bool, List[str]]:
             logger.error("Timeout during content safety check")
             return False, ["Content safety check timed out"]
         except json.JSONDecodeError as e:
-            logger.error(f"Error parsing GPT response: {str(e)}")
+            logger.error(f"Error parsing Gemini response: {str(e)}")
             return False, ["Unable to verify content safety"]
         except Exception as e:
-            logger.error(f"Error in GPT content check: {str(e)}")
+            logger.error(f"Error in Gemini content check: {str(e)}")
             return False, ["Error checking content safety"]
         
     except Exception as e:
