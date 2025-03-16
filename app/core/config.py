@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     EMPOWERVERSE_API_PATH: str
     WEMOTIONS_API_PATH: str
     VIDEO_DESCRIPTION_KEY: str
+    GEMINI_API_KEY: str
 
     class Config:
         env_file = ".env"
