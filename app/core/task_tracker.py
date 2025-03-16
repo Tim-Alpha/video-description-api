@@ -1,8 +1,9 @@
+# enhanced the TaskTracker class with complete type annotations, better error handling, and new methods for retrieving task status and listing all tasks
 import json
 import time
 from datetime import datetime
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 class TaskTracker:
     def __init__(self, data_file: str = "docs/data_record.json"):
@@ -10,7 +11,7 @@ class TaskTracker:
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self.load_data()
 
-    def load_data(self):
+    def load_data(self) -> None:
         """Load existing data from the JSON file."""
         try:
             if os.path.exists(self.data_file):
@@ -20,7 +21,7 @@ class TaskTracker:
             print(f"Error loading data: {str(e)}")
             self.tasks = {}
 
-    def save_data(self):
+    def save_data(self) -> None:
         """Save current data to the JSON file."""
         os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
         try:
@@ -29,7 +30,7 @@ class TaskTracker:
         except Exception as e:
             print(f"Error saving data: {str(e)}")
 
-    def _print_progress_indicator(self, message: str, timing_info: str = None):
+    def _print_progress_indicator(self, message: str, timing_info: Optional[str] = None) -> None:
         """Print a visual progress indicator with timing information."""
         separator = "=" * 30
         print(f"\n{separator}")
@@ -38,13 +39,13 @@ class TaskTracker:
             print(timing_info)
         print(f"{separator}\n")
 
-    def _calculate_duration(self, start_time: str, end_time: str = None) -> float:
+    def _calculate_duration(self, start_time: str, end_time: Optional[str] = None) -> float:
         """Calculate duration between two timestamps."""
         start = datetime.fromisoformat(start_time)
         end = datetime.fromisoformat(end_time) if end_time else datetime.now()
         return (end - start).total_seconds()
 
-    def start_task(self, task_id: str):
+    def start_task(self, task_id: str) -> None:
         """Initialize a new task with timing and progress data."""
         start_time = datetime.now().isoformat()
         self.tasks[task_id] = {
@@ -63,8 +64,9 @@ class TaskTracker:
             f"Start Time: {datetime.fromisoformat(start_time).strftime('%Y-%m-%d %H:%M:%S')}"
         )
         self.save_data()
+        return task_id  # Return task_id for chaining operations
 
-    def update_progress(self, task_id: str, step_name: str, progress: int):
+    def update_progress(self, task_id: str, step_name: str, progress: int) -> None:
         """Update progress for a specific step in the task."""
         if task_id not in self.tasks:
             self.start_task(task_id)
@@ -97,7 +99,7 @@ class TaskTracker:
         self.tasks[task_id]["current_progress"] = progress
         self.save_data()
 
-    def complete_step(self, task_id: str, step_name: str):
+    def complete_step(self, task_id: str, step_name: str) -> None:
         """Mark a step as completed and record its completion time."""
         if task_id in self.tasks and step_name in self.tasks[task_id]["steps"]:
             current_time = datetime.now().isoformat()
@@ -117,38 +119,43 @@ class TaskTracker:
             )
             self.save_data()
 
-    def complete_task(self, task_id: str, status: str = "completed"):
-        """Mark a task as completed and calculate total duration."""
-        if task_id in self.tasks:
-            end_time = datetime.now().isoformat()
-            self.tasks[task_id]["end_time"] = end_time
-            self.tasks[task_id]["status"] = status
-            
-            # Calculate total duration
-            total_duration = self._calculate_duration(
-                self.tasks[task_id]["start_time"],
-                end_time
-            )
-            self.tasks[task_id]["timing"]["end_time"] = end_time
-            self.tasks[task_id]["timing"]["total_duration_seconds"] = total_duration
-            
-            # Calculate step durations
-            step_durations = {}
-            for step, timing in self.tasks[task_id]["timing"]["steps_timing"].items():
-                if "end_time" in timing:
-                    duration = self._calculate_duration(timing["start_time"], timing["end_time"])
-                else:
-                    duration = self._calculate_duration(timing["start_time"], end_time)
-                step_durations[step] = duration
+    def complete_task(self, task_id: str, status: str = "completed") -> Dict[str, Any]:
+        """Mark a task as completed and calculate total duration. Returns task data."""
+        if task_id not in self.tasks:
+            raise ValueError(f"Task {task_id} not found.")
 
-            # Print final summary
-            self._print_progress_indicator(
-                f"Task {task_id} {status}",
-                self._format_task_summary(task_id, status, total_duration, step_durations)
-            )
-            
-            self.tasks[task_id]["current_progress"] = 100
-            self.save_data()
+        end_time = datetime.now().isoformat()
+        self.tasks[task_id]["end_time"] = end_time
+        self.tasks[task_id]["status"] = status
+        
+        # Calculate total duration
+        total_duration = self._calculate_duration(
+            self.tasks[task_id]["start_time"],
+            end_time
+        )
+        self.tasks[task_id]["timing"]["end_time"] = end_time
+        self.tasks[task_id]["timing"]["total_duration_seconds"] = total_duration
+        
+        # Calculate step durations
+        step_durations = {}
+        for step, timing in self.tasks[task_id]["timing"]["steps_timing"].items():
+            if "end_time" in timing:
+                duration = self._calculate_duration(timing["start_time"], timing["end_time"])
+            else:
+                duration = self._calculate_duration(timing["start_time"], end_time)
+            step_durations[step] = duration
+
+        # Print final summary
+        self._print_progress_indicator(
+            f"Task {task_id} {status}",
+            self._format_task_summary(task_id, status, total_duration, step_durations)
+        )
+        
+        self.tasks[task_id]["current_progress"] = 100
+        self.save_data()
+        
+        # Return a copy of the task data
+        return self.tasks[task_id].copy()
 
     def _format_task_summary(self, task_id: str, status: str, total_duration: float, step_durations: Dict[str, float]) -> str:
         """Format the task summary with timing information."""
@@ -166,5 +173,22 @@ class TaskTracker:
         
         return "\n".join(summary)
 
+    def get_task_status(self, task_id: str) -> Dict[str, Any]:
+        """Get current status and progress of a task."""
+        if task_id not in self.tasks:
+            raise ValueError(f"Task {task_id} not found.")
+        
+        return {
+            "status": self.tasks[task_id]["status"],
+            "progress": self.tasks[task_id]["current_progress"],
+            "steps": len(self.tasks[task_id]["steps"]),
+            "duration_so_far": self._calculate_duration(self.tasks[task_id]["start_time"])
+        }
+        
+    def get_all_tasks(self) -> Dict[str, Dict[str, Any]]:
+        """Return a list of all tasks with their status."""
+        return {task_id: {"status": data["status"], "progress": data["current_progress"]} 
+                for task_id, data in self.tasks.items()}
+
 # Global instance
-task_tracker = TaskTracker() 
+task_tracker = TaskTracker()
