@@ -1,11 +1,14 @@
 import base64
-from openai import AsyncOpenAI
+import google.generativeai as genai
 from app.core.task_tracker import task_tracker
 from app.core.config import settings
 from app.core.logging import logger
 from typing import List
+import asyncio
+import json
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+# Initialize Gemini API
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 async def analyze_grid_images(base64_images: List[str], task_id: str = None) -> List[str]:
     """
@@ -51,25 +54,22 @@ async def analyze_grid_images(base64_images: List[str], task_id: str = None) -> 
             Pay special attention to elements that indicate Christian content or messaging.
             """
 
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500
-            )
-            descriptions.append(response.choices[0].message.content.strip())
+            # Create a coroutine to run the synchronous Gemini API call in a separate thread
+            loop = asyncio.get_event_loop()
+            
+            def sync_analyze_image():
+                model = genai.GenerativeModel('gemini-pro-vision')
+                response = model.generate_content(
+                    [
+                        prompt,
+                        {"mime_type": "image/png", "data": base64.b64decode(base64_image)}
+                    ]
+                )
+                return response.text
+            
+            # Run the synchronous function in a thread pool
+            description = await loop.run_in_executor(None, sync_analyze_image)
+            descriptions.append(description.strip())
         
         return descriptions
     except Exception as e:
@@ -149,26 +149,27 @@ async def generate_description(base64_images: List[str], audio_transcription: st
         Provide a natural, flowing narrative that combines all these elements into a coherent analysis.
         """
 
-        # Generate final combined description
-        response = await client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {
-                    "role": "user",
-                    "content": final_prompt
-                }
-            ],
-            max_tokens=1500
-        )
+        # Create a coroutine to run the synchronous Gemini API call in a separate thread
+        loop = asyncio.get_event_loop()
+        
+        def sync_generate_description():
+            model = genai.GenerativeModel('gemini-1.5-pro')  # Using Gemini 1.5 Pro for more comprehensive analysis
+            response = model.generate_content(
+                final_prompt,
+                generation_config={"temperature": 0.2, "max_output_tokens": 1500}
+            )
+            return response.text
+        
+        # Run the synchronous function in a thread pool
+        description = await loop.run_in_executor(None, sync_generate_description)
         
         if task_id:
             task_tracker.update_progress(task_id, "Description generation completed", 75)
             
-        return response.choices[0].message.content.strip()
+        return description.strip()
     except Exception as e:
         error_msg = f"Error in generate_description: {str(e)}"
         logger.error(error_msg)
         if task_id:
             task_tracker.update_progress(task_id, f"Error: {error_msg}", 75)
         return error_msg
-    
