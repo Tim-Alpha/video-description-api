@@ -1,15 +1,17 @@
-from openai import AsyncOpenAI
+from google.generativeai import GenerativeModel
 from app.core import task_tracker
 from app.core.config import settings
 from app.core.logging import logger
 import json
+import asyncio
+import google.generativeai as genai
 
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-
+# Initialize Gemini client
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 async def extract_video_metadata(description: str, is_christian_content: bool = False, task_id: str = None) -> dict:
     """
-    Extract metadata from video description using GPT-4.
+    Extract metadata from video description using Gemini.
     
     Args:
         description (str): Video description
@@ -55,22 +57,23 @@ async def extract_video_metadata(description: str, is_christian_content: bool = 
         }}
         
         Ensure all fields are filled based on the information available in the description.
-        Return the response in valid JSON format.
+        Return the response in valid JSON format. Do not include any explanations outside the JSON.
         """
         
-        # Make the API call
-        response = await client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are an expert content analyzer."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=1000
+        # Initialize the model
+        model = GenerativeModel(model_name="gemini-1.5-pro")
+        
+        # Make the API call - using a synchronous call inside an async function
+        loop = asyncio.get_event_loop()
+        response_content = await loop.run_in_executor(
+            None,
+            lambda: model.generate_content([
+                {"role": "user", "parts": [prompt]}
+            ]).text
         )
         
         # Parse and return the response
-        extracted_metadata = json.loads(response.choices[0].message.content.strip())
+        extracted_metadata = json.loads(response_content.strip())
 
         if is_christian_content:
             christian_content = await analyze_christian_content(description, task_id)
@@ -100,9 +103,13 @@ async def analyze_christian_content(description: str, task_id: str = None) -> di
             - indicators: List of specific Christian elements/themes detected.
     """
     try:
-        # Define the prompt for GPT
-        system_prompt = """You are an expert in analyzing content for Christian themes.
+        # Define the prompt for Gemini
+        prompt = f"""
+        You are an expert in analyzing content for Christian themes.
         Based on the given description, identify if it contains Christian content.
+        
+        Description: {description}
+        
         Provide the following details:
         1. "is_christian": Boolean value indicating if Christian content is present.
         2. "confidence_score": A numeric value (0.0-1.0) representing the certainty of Christian content presence.
@@ -110,32 +117,31 @@ async def analyze_christian_content(description: str, task_id: str = None) -> di
            (e.g., Bible verses, religious symbols, prayers, mentions of Jesus, etc.).
 
         Return the result strictly in the following JSON format:
-        {
+        {{
             "is_christian": boolean,
             "confidence_score": number,
             "indicators": [string]
-        }
-        If no Christian content is found, set "is_christian" to false, "confidence_score" to 0.0, and "indicators" to an empty list."""
-
-        user_message = f"""
-        Analyze the following description for Christian content:
-        {description}
+        }}
+        If no Christian content is found, set "is_christian" to false, "confidence_score" to 0.0, and "indicators" to an empty list.
+        
+        Do not include any explanations outside the JSON.
         """
 
-        # Call GPT model
-        response = await client.chat.completions.create(
-            model="gpt-4",  # Fixed model name
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message}
-            ],
-            max_tokens=500,
-            temperature=0.3
+        # Initialize the model
+        model = GenerativeModel(model_name="gemini-1.5-pro")
+        
+        # Make the API call - using a synchronous call inside an async function
+        loop = asyncio.get_event_loop()
+        response_content = await loop.run_in_executor(
+            None,
+            lambda: model.generate_content([
+                {"role": "user", "parts": [prompt]}
+            ]).text
         )
 
         # Parse the response as JSON
         try:
-            result = json.loads(response.choices[0].message.content.strip())
+            result = json.loads(response_content.strip())
             
             # Ensure "is_christian" is present
             if "is_christian" not in result:
@@ -160,4 +166,3 @@ async def analyze_christian_content(description: str, task_id: str = None) -> di
             "confidence_score": 0.0,
             "indicators": []
         }
-    
