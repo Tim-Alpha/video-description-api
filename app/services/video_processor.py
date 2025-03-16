@@ -6,18 +6,21 @@ import base64
 from app.core.logging import logger
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-from openai import AsyncOpenAI
-from app.core.config import settings
 import asyncio
 from collections import defaultdict
 import tempfile
 import os
 from app.core.task_tracker import task_tracker
 import json
+import google.generativeai as genai
+from google.generativeai import GenerativeModel
+from app.core.config import settings
 
 # Task queue to store processing results
 task_queue: Dict[str, Dict] = defaultdict(dict)
-client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+# Configure Gemini API
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 async def split_video(video_content: bytes, task_id: str) -> List[bytes]:
     """
@@ -196,82 +199,84 @@ async def extract_frames(video_chunk: bytes) -> str:
 
 async def check_content_moderation(base64_images: List[str]) -> Tuple[bool, List[str]]:
     """
-    Ultra-strict content moderation using OpenAI's moderation API.
-    Extremely conservative thresholds for all categories.
+    Ultra-strict content moderation using Gemini's content safety features.
     """
     try:
         all_warnings = []
         is_safe = True
         
-        # Ultra-strict thresholds for different categories
-        thresholds = {
-            'sexual': 0.25,            # 25%
-            'sexual/minors': 0.25,   # 25%
-            'violence': 0.25,         # 25%
-            'violence/graphic': 0.25,  # 25%
-            'harassment': 0.25,       # 25%
-            'harassment/threatening': 0.25,  # 25%
-            'hate': 0.25,            # 25%
-            'hate/threatening': 0.25,  # 25%
-            'self-harm': 0.25,        # 25%
-            'self-harm/intent': 0.25,  # 25%
-            'self-harm/instructions': 0.25,  # 25%
-            'illicit': 0.25,         # 25%
-            'illicit/violent': 0.25    # 25%
+        # Map for severity levels
+        severity_map = {
+            "HIGH": "CRITICAL",
+            "MEDIUM": "HIGH",
+            "LOW": "MEDIUM"
+        }
+        
+        # Category mapping
+        category_map = {
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "Sexual Content",
+            "HARM_CATEGORY_HATE_SPEECH": "Hate Speech",
+            "HARM_CATEGORY_HARASSMENT": "Harassment",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "Dangerous Content",
+            "HARM_CATEGORY_UNSPECIFIED": "Unspecified Risk"
         }
         
         # Process each image individually
         for idx, base64_image in enumerate(base64_images):
-            response = await client.moderations.create(
-                model="omni-moderation-latest",
-                input=[{
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64_image}"
+            # Initialize the model
+            model = GenerativeModel("gemini-1.5-pro-vision")
+            
+            # Prepare the image content
+            image_part = {
+                "mime_type": "image/png",
+                "data": base64_image
+            }
+            
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: model.generate_content(
+                    [
+                        "Perform a strict content safety analysis on this image. Identify any potential safety concerns.",
+                        image_part
+                    ],
+                    safety_settings={
+                        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_MEDIUM",
+                        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_MEDIUM",
+                        "HARM_CATEGORY_HARASSMENT": "BLOCK_MEDIUM",
+                        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_MEDIUM"
                     }
-                }]
+                )
             )
             
-            result = response.results[0]
-            
-            # Check if content is flagged by any category
-            if result.flagged:
+            # Check if the response was blocked
+            if hasattr(response, "prompt_feedback") and response.prompt_feedback.block_reason:
                 is_safe = False
-                all_warnings.append("SYSTEM FLAG - Content flagged by moderation system")
-            
-            # Check all categories with their specific thresholds
-            for category in thresholds.keys():
-                # Get score safely using getattr
-                score = getattr(result.category_scores, category.replace('/', '_'), 0.0)
+                block_reason = response.prompt_feedback.block_reason
+                all_warnings.append(f"CRITICAL RISK - Content blocked by moderation system: {block_reason}")
+                continue
                 
-                if not isinstance(score, (int, float)):
-                    continue
-                
-                threshold = thresholds[category]
-                display_category = category.replace('/', ' - ').title()
-                
-                if score >= threshold:
+            # Check for safety attributes
+            if hasattr(response, "safety_ratings"):
+                for rating in response.safety_ratings:
+                    if rating.probability and rating.probability not in ["NEGLIGIBLE", "LOW"]:
+                        is_safe = False
+                        category = category_map.get(rating.category, "Unknown Category")
+                        severity = severity_map.get(rating.probability, "LOW")
+                        all_warnings.append(f"{severity} RISK - {category} detected")
+                        
+            # Also analyze the content of the response for additional safety checks
+            try:
+                text_response = response.text.strip()
+                if any(keyword in text_response.lower() for keyword in ["unsafe", "inappropriate", "explicit", "violence", "harmful"]):
                     is_safe = False
-                    if score > 0.7:
-                        severity = "CRITICAL"
-                    elif score > 0.4:
-                        severity = "HIGH"
-                    elif score > 0.2:
-                        severity = "MEDIUM"
-                    else:
-                        # pass
-                        severity = "LOW" # In low if confidence is below 25% then it is safe
-                    all_warnings.append(f"{severity} RISK - {display_category} detected (confidence: {score:.1%})")
-            
-            # Check applied input types for additional context
-            for category in thresholds.keys():
-                category_key = category.replace('/', '_')
-                types = getattr(result.category_applied_input_types, category_key, [])
-                score = getattr(result.category_scores, category_key, 0.0)
-                
-                if "image" in types and score >= thresholds[category]:
-                    display_category = category.replace('/', ' - ').title()
-                    all_warnings.append(f"IMAGE SPECIFIC - {display_category} detected in visual content")
+                    # Extract the reason from the response text
+                    lines = text_response.split('\n')
+                    for line in lines:
+                        if any(keyword in line.lower() for keyword in ["unsafe", "inappropriate", "explicit", "violence", "harmful"]):
+                            all_warnings.append(f"MEDIUM RISK - Potential issue detected: {line}")
+            except Exception as text_error:
+                logger.error(f"Error analyzing text response: {str(text_error)}")
         
         # Remove duplicates while preserving order
         seen = set()
@@ -311,7 +316,7 @@ async def check_content_moderation(base64_images: List[str]) -> Tuple[bool, List
 
 async def analyze_grid_images(base64_images: List[str], task_id: str = None) -> List[str]:
     """
-    Analyze grid images using GPT-4 vision model.
+    Analyze grid images using Gemini vision model.
     """
     try:
         descriptions = []
@@ -323,33 +328,34 @@ async def analyze_grid_images(base64_images: List[str], task_id: str = None) -> 
                 task_tracker.update_progress(task_id, f"Analyzing grid image {idx}/{total_images}", progress)
             
             try:
-                response = await client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "You are a video frame analysis expert. Describe the key visual elements, actions, and details in this frame grid."
-                        },
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": "Analyze this grid of video frames. Focus on: main subjects, actions, visual elements, text overlays, scene composition, and any notable details."
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{base64_image}"
-                                    }
-                                }
-                            ]
-                        }
-                    ],
-                    max_tokens=500
+                # Initialize the model
+                model = GenerativeModel("gemini-1.5-pro-vision")
+                
+                # Prepare the prompt
+                system_prompt = "You are a video frame analysis expert. Describe the key visual elements, actions, and details in this frame grid."
+                user_prompt = "Analyze this grid of video frames. Focus on: main subjects, actions, visual elements, text overlays, scene composition, and any notable details."
+                
+                # Prepare the image content
+                image_part = {
+                    "mime_type": "image/png",
+                    "data": base64_image
+                }
+                
+                # Make the API call
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: model.generate_content(
+                        [
+                            system_prompt,
+                            user_prompt,
+                            image_part
+                        ]
+                    )
                 )
                 
-                description = response.choices[0].message.content.strip()
+                # Extract description
+                description = response.text.strip()
                 descriptions.append(description)
                 
             except Exception as e:
@@ -368,7 +374,6 @@ async def process_video(video_content: bytes, task_id: str) -> Tuple[bool, List[
     """
     try:
         task_tracker.update_progress(task_id, "Starting video processing", 5)
-        
         # Split video into parts
         video_parts = await split_video(video_content, task_id)
         task_tracker.update_progress(task_id, "Video split completed", 15)
