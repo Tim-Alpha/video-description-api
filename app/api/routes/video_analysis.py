@@ -262,35 +262,32 @@ async def get_analysis_result(task_id: str):
         return {"status": "pending", "progress": 0}
     return result
 
+
+def validate_token(flic_token: str) -> str:
+    """Validate the token and return the associated app name."""
+    token_map = {
+        EMPOWERVERSE_API_KEY: "empowerverse",
+        WEMOTIONS_API_KEY: "wemotions"
+    }
+    return token_map.get(flic_token, None)
 @router.post("/share_url")
 async def share_url(
     background_tasks: BackgroundTasks,
     flic_token: str = Header(...),
     data: dict = Body(...)
 ):
-    url = data.get('url')
-    identifier = data.get('identifier'),
-    is_christian_content = data.get('is_christian_content', False)
-
-     # Check if flic_token is valid for either API key
-    if flic_token == EMPOWERVERSE_API_KEY:
-        app_name = "empowerverse"
-    elif flic_token == WEMOTIONS_API_KEY:
-        app_name = "wemotions"
-    else:
-        return {
-            "status": "error",
-            "message": "Invalid Flic_Token"
-        }
-
+    url = data.get("url")
+    identifier = data.get("identifier")
+    is_christian_content = data.get("is_christian_content", False)
+    
+    app_name = validate_token(flic_token)
+    if not app_name:
+        raise HTTPException(status_code=401, detail="Invalid Flic_Token")
+    
     if not url or not identifier:
-        return {
-            "status": "error",
-            "message": "url and identifier are required fields"
-        }
-
+        raise HTTPException(status_code=400, detail="'url' and 'identifier' are required fields")
+    
     background_tasks.add_task(analyze_video, background_tasks, app_name, file_url=url, identifier=identifier, is_christian_content=is_christian_content)
-    return {
-        "status": "success",
-        "message": "URL processed successfully, video processing in queue..."
-    }
+    
+    return {"status": "success", "message": "URL processed successfully, video processing in queue..."}
+
